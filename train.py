@@ -18,11 +18,11 @@ from model import DinoV3Detector
 # 配置
 # =========================
 
-data_root = "/data/hdd3/pw/stable_diffusion_v_1_5/imagenet_ai_0424_sdv5"
+data_root = "/data/hdd3/pw/AIGIBench"
 
 ckpt_path = "/data/hdd3/pw/work/checkpoint/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth"
 
-epochs = 10
+epochs = 20
 batch_size = 8
 lr = 1e-4
 
@@ -75,14 +75,14 @@ def main():
         data_root,
         "train",
         transform=train_transform,
-        max_samples=2000
+        max_samples=100000
     )
 
     val_dataset = AIGCDataset(
         data_root,
         "val",
         transform=val_transform,
-        max_samples=500
+        max_samples=10000
     )
 
 
@@ -104,7 +104,9 @@ def main():
         batch_size=batch_size,
         sampler=train_sampler,
         num_workers=4,
-        pin_memory=True
+        persistent_workers=True,
+        pin_memory=True,
+        drop_last=True
     )
 
     val_loader = DataLoader(
@@ -112,7 +114,9 @@ def main():
         batch_size=batch_size,
         sampler=val_sampler,
         num_workers=4,
-        pin_memory=True
+        persistent_workers=True,
+        pin_memory=True,
+        drop_last=True
     )
 
 
@@ -122,14 +126,12 @@ def main():
 
     model = DinoV3Detector(ckpt_path).to(device)
     
-    for p in model.backbone.parameters():
-        p.requires_grad = False
-
+   
     model = DDP(
     model,
     device_ids=[local_rank],
     output_device=local_rank,
-    find_unused_parameters=True
+    find_unused_parameters=False
     )
 
 
@@ -139,9 +141,10 @@ def main():
 
     criterion = nn.CrossEntropyLoss()
 
-    optimizer = torch.optim.Adam(
-        model.module.classifier.parameters(),
-        lr=lr
+    optimizer = torch.optim.AdamW(
+    filter(lambda p: p.requires_grad, model.parameters()),
+    lr=lr,
+    weight_decay=1e-4
     )
 
 
@@ -155,6 +158,8 @@ def main():
     best_acc = 0
 
 
+    
+
     # =========================
     # training loop
     # =========================
@@ -166,11 +171,23 @@ def main():
         model.train()
 
         total_loss = 0
-        correct = 0
-        total = 0
+        correct = torch.tensor(0, device=device)
+        total = torch.tensor(0, device=device)
+
+        if rank == 0:
+            print(model.module.backbone.backbone.blocks[0].attn.qkv)
 
         if rank == 0:
             pbar = tqdm(train_loader)
+            
+        if rank == 0:
+            trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            total_params = sum(p.numel() for p in model.parameters())
+            print("Trainable params:", trainable)
+            print("Total params:", total_params)
+
+        
+
         else:
             pbar = train_loader
 
@@ -201,27 +218,34 @@ def main():
 
             pred_label = pred.argmax(dim=1)
 
-            correct += (pred_label == label).sum().item()
+            correct += (pred_label == label).sum()
 
             total += label.size(0)
 
 
-        train_acc = correct / total
+        train_loss = total_loss / len(train_loader)
+
+
+        dist.all_reduce(correct)
+        dist.all_reduce(total)
+
+        train_acc = (correct / total).item()
 
 
         if rank == 0:
 
-            print(f"\nEpoch {epoch} Train Loss {total_loss:.4f} Acc {train_acc:.4f}")
+            print(f"\nEpoch {epoch} Train Loss {train_loss:.4f} Acc {train_acc:.4f}")
 
-
+        if rank == 0 and epoch == 0:
+            print(torch.bincount(pred_label))
         # =========================
         # validation
         # =========================
 
         model.eval()
 
-        correct = 0
-        total = 0
+        correct = torch.tensor(0, device=device)
+        total = torch.tensor(0, device=device)
 
         with torch.no_grad():
 
@@ -234,12 +258,15 @@ def main():
 
                 pred_label = pred.argmax(dim=1)
 
-                correct += (pred_label == label).sum().item()
+                correct += (pred_label == label).sum()
 
                 total += label.size(0)
 
 
-        val_acc = correct / total
+        dist.all_reduce(correct)
+        dist.all_reduce(total)
+
+        val_acc = (correct / total).item()
 
 
         if rank == 0:
