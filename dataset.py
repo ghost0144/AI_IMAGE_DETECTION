@@ -30,38 +30,26 @@ class AIGCDataset(Dataset):
             raise ValueError(f"{split_dir} does not exist")
 
         # 遍历类别，例如 car cat chair
-        classes = sorted(os.listdir(split_dir))
+        IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".JPEG")
 
-        for cls in classes:
+        for root, _, files in os.walk(split_dir):
 
-            cls_dir = os.path.join(split_dir, cls)
-
-            if not os.path.isdir(cls_dir):
+        # 判断标签
+            if "0_real" in root:
+                label = 0
+            elif "1_fake" in root:
+                label = 1
+            else:
                 continue
 
-            real_dir = os.path.join(cls_dir, "0_real")
-            fake_dir = os.path.join(cls_dir, "1_fake")
+            for f in files:
+                if f.lower().endswith(IMG_EXTS):
 
-            # real images
-            if os.path.exists(real_dir):
+                    path = os.path.join(root, f)
 
-                for f in os.listdir(real_dir):
-
-                    if f.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
-
-                        path = os.path.join(real_dir, f)
-
+                    if label == 0:
                         real_samples.append((path, 0))
-
-            # fake images
-            if os.path.exists(fake_dir):
-
-                for f in os.listdir(fake_dir):
-
-                    if f.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
-
-                        path = os.path.join(fake_dir, f)
-
+                    else:
                         fake_samples.append((path, 1))
 
 
@@ -73,18 +61,18 @@ class AIGCDataset(Dataset):
 
             half = max_samples // 2
 
-            real_samples = real_samples[:half]
-            fake_samples = fake_samples[:half]
+            real_samples = random.sample(real_samples, min(len(real_samples), half))
+            fake_samples = random.sample(fake_samples, min(len(fake_samples), half))
 
 
         # =========================
         # Step2: balance
         # =========================
 
-        min_len = min(len(real_samples), len(fake_samples))
-
-        real_samples = real_samples[:min_len]
-        fake_samples = fake_samples[:min_len]
+        if len(real_samples) > len(fake_samples):
+            real_samples = random.sample(real_samples, len(fake_samples))
+        else:
+            fake_samples = random.sample(fake_samples, len(real_samples))
 
 
         # =========================
@@ -130,7 +118,10 @@ class AIGCDataset(Dataset):
 
         path, label = self.samples[idx]
 
-        img = Image.open(path).convert("RGB")
+        try:
+            img = Image.open(path).convert("RGB")
+        except:
+            return self.__getitem__(random.randint(0, len(self.samples)-1))
 
         img = self.transform(img)
 

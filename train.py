@@ -18,7 +18,8 @@ from model import DinoV3Detector
 # 配置
 # =========================
 
-data_root = "/data/hdd3/pw/AIGIBench"
+train_data_root = "/data/hdd3/pw/stable_diffusion_v_1_4/imagenet_ai_0419_sdv4"
+test_data_root = "/data/hdd3/pw/AIGIBench"
 
 ckpt_path = "/data/hdd3/pw/work/checkpoint/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth"
 
@@ -27,7 +28,7 @@ batch_size = 8
 lr = 1e-4
 
 save_path = "checkpoint.pth"
-
+resume = True   # 是否从checkpoint恢复
 
 # =========================
 # 初始化DDP
@@ -45,6 +46,33 @@ def setup_ddp():
 
     return local_rank, device
 
+def evaluate(model, loader, device):
+
+    model.eval()
+
+    correct = torch.tensor(0, device=device)
+    total = torch.tensor(0, device=device)
+
+    with torch.no_grad():
+
+        for img, label in loader:
+
+            img = img.to(device, non_blocking=True)
+            label = label.to(device, non_blocking=True)
+
+            pred = model(img)
+
+            pred_label = pred.argmax(dim=1)
+
+            correct += (pred_label == label).sum()
+            total += label.size(0)
+
+    dist.all_reduce(correct)
+    dist.all_reduce(total)
+
+    acc = (correct / total).item()
+
+    return acc
 
 # =========================
 # 主函数
@@ -72,19 +100,25 @@ def main():
     # =========================
 
     train_dataset = AIGCDataset(
-        data_root,
+        train_data_root,
         "train",
         transform=train_transform,
-        max_samples=100000
-    )
-
-    val_dataset = AIGCDataset(
-        data_root,
-        "val",
-        transform=val_transform,
         max_samples=10000
     )
 
+    val_dataset = AIGCDataset(
+        train_data_root,
+        "val",
+        transform=val_transform,
+        max_samples=1000
+    )
+
+    test_dataset = AIGCDataset(
+        test_data_root,
+        "test",  
+        transform=val_transform,
+        max_samples=10000   # 可调
+    )
 
     # =========================
     # sampler
@@ -94,6 +128,7 @@ def main():
 
     val_sampler = DistributedSampler(val_dataset, shuffle=False)
 
+    test_sampler = DistributedSampler(test_dataset, shuffle=False)
 
     # =========================
     # dataloader
@@ -119,6 +154,15 @@ def main():
         drop_last=True
     )
 
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        sampler=test_sampler,
+        num_workers=4,
+        persistent_workers=True,   
+        pin_memory=True,
+        drop_last=False   #  test不丢数据
+    )
 
     # =========================
     # model
@@ -126,6 +170,14 @@ def main():
 
     model = DinoV3Detector(ckpt_path).to(device)
     
+    if resume and os.path.exists(save_path):
+        if rank == 0:
+            print(f"Loading checkpoint from {save_path}")
+
+        # 先加载到CPU，避免多卡冲突
+        checkpoint = torch.load(save_path, map_location="cpu")
+
+        model.load_state_dict(checkpoint, strict=True)
    
     model = DDP(
     model,
@@ -174,8 +226,8 @@ def main():
         correct = torch.tensor(0, device=device)
         total = torch.tensor(0, device=device)
 
-        if rank == 0:
-            print(model.module.backbone.backbone.blocks[0].attn.qkv)
+#       if rank == 0:
+#           print(model.module.backbone.backbone.blocks[0].attn.qkv)
 
         if rank == 0:
             pbar = tqdm(train_loader)
@@ -236,43 +288,14 @@ def main():
 
             print(f"\nEpoch {epoch} Train Loss {train_loss:.4f} Acc {train_acc:.4f}")
 
-        if rank == 0 and epoch == 0:
-            print(torch.bincount(pred_label))
         # =========================
         # validation
         # =========================
 
-        model.eval()
-
-        correct = torch.tensor(0, device=device)
-        total = torch.tensor(0, device=device)
-
-        with torch.no_grad():
-
-            for img, label in val_loader:
-
-                img = img.to(device, non_blocking=True)
-                label = label.to(device, non_blocking=True)
-
-                pred = model(img)
-
-                pred_label = pred.argmax(dim=1)
-
-                correct += (pred_label == label).sum()
-
-                total += label.size(0)
-
-
-        dist.all_reduce(correct)
-        dist.all_reduce(total)
-
-        val_acc = (correct / total).item()
+        val_acc = evaluate(model, val_loader, device)
 
 
         if rank == 0:
-
-            print(f"Epoch {epoch} Val Acc {val_acc:.4f}")
-
 
             if val_acc > best_acc:
 
@@ -285,7 +308,10 @@ def main():
 
                 print("Saved best model")
 
-
+        test_acc = evaluate(model, test_loader, device)
+        
+        if rank == 0:
+            print(f"Epoch {epoch} Val Acc {val_acc:.4f} | Test Acc {test_acc:.4f}")
 # =========================
 
 if __name__ == "__main__":
