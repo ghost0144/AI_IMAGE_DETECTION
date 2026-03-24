@@ -28,7 +28,7 @@ batch_size = 8
 lr = 1e-4
 
 save_path = "checkpoint.pth"
-resume = True   # 是否从checkpoint恢复
+resume = False   # 是否从checkpoint恢复
 
 # =========================
 # 初始化DDP
@@ -74,11 +74,36 @@ def evaluate(model, loader, device):
 
     return acc
 
+def evaluate_single(model, loader, device):
+
+    model.eval()
+
+    correct = 0
+    total = 0
+
+    with torch.no_grad():
+        for img, label in loader:
+
+            img = img.to(device)
+            label = label.to(device)
+
+            pred = model(img)
+            pred = pred.argmax(1)
+
+            correct += (pred == label).sum().item()
+            total += label.size(0)
+
+    return correct / total
+
+
 # =========================
 # 主函数
 # =========================
 
 def main():
+
+    from seed import set_seed
+    set_seed(42)
 
     torch.backends.cudnn.benchmark = True
 
@@ -128,7 +153,6 @@ def main():
 
     val_sampler = DistributedSampler(val_dataset, shuffle=False)
 
-    test_sampler = DistributedSampler(test_dataset, shuffle=False)
 
     # =========================
     # dataloader
@@ -156,12 +180,11 @@ def main():
 
     test_loader = DataLoader(
         test_dataset,
-        batch_size=batch_size,
-        sampler=test_sampler,
+        batch_size=32,  
+        shuffle=False,
         num_workers=4,
-        persistent_workers=True,   
         pin_memory=True,
-        drop_last=False   #  test不丢数据
+        drop_last=False
     )
 
     # =========================
@@ -308,9 +331,10 @@ def main():
 
                 print("Saved best model")
 
-        test_acc = evaluate(model, test_loader, device)
-        
         if rank == 0:
+
+            test_acc = evaluate_single(model.module, test_loader, device)
+
             print(f"Epoch {epoch} Val Acc {val_acc:.4f} | Test Acc {test_acc:.4f}")
 # =========================
 

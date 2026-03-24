@@ -29,12 +29,13 @@ class AIGCDataset(Dataset):
         if not os.path.exists(split_dir):
             raise ValueError(f"{split_dir} does not exist")
 
-        # 遍历类别，例如 car cat chair
         IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".JPEG")
 
+        # =========================
+        # 扫描数据
+        # =========================
         for root, _, files in os.walk(split_dir):
 
-        # 判断标签
             if "0_real" in root:
                 label = 0
             elif "1_fake" in root:
@@ -52,42 +53,46 @@ class AIGCDataset(Dataset):
                     else:
                         fake_samples.append((path, 1))
 
+        # =========================
+        #  test：完全固定逻辑
+        # =========================
+        if split == "test":
+
+            samples = real_samples + fake_samples
+
+            # 固定采样
+            if max_samples is not None:
+                random.seed(42)
+                samples = random.sample(samples, min(len(samples), max_samples))
+
+            # 固定顺序
+            self.samples = sorted(samples)
 
         # =========================
-        # Step1: max_samples 控制（先按类别）
+        # train / val
         # =========================
-
-        if max_samples is not None:
-
-            half = max_samples // 2
-
-            real_samples = random.sample(real_samples, min(len(real_samples), half))
-            fake_samples = random.sample(fake_samples, min(len(fake_samples), half))
-
-
-        # =========================
-        # Step2: balance
-        # =========================
-
-        if len(real_samples) > len(fake_samples):
-            real_samples = random.sample(real_samples, len(fake_samples))
         else:
-            fake_samples = random.sample(fake_samples, len(real_samples))
 
+            # Step1: max_samples
+            if max_samples is not None:
+                half = max_samples // 2
 
-        # =========================
-        # 合并 + shuffle
-        # =========================
+                real_samples = random.sample(real_samples, min(len(real_samples), half))
+                fake_samples = random.sample(fake_samples, min(len(fake_samples), half))
 
-        self.samples = real_samples + fake_samples
+            # Step2: balance
+            min_len = min(len(real_samples), len(fake_samples))
 
-        random.shuffle(self.samples)
+            real_samples = random.sample(real_samples, min_len)
+            fake_samples = random.sample(fake_samples, min_len)
 
+            self.samples = real_samples + fake_samples
+
+            random.shuffle(self.samples)
 
         # =========================
         # Transform
         # =========================
-
         if transform is None:
 
             self.transform = transforms.Compose([
@@ -100,19 +105,12 @@ class AIGCDataset(Dataset):
             ])
 
         else:
-
             self.transform = transform
 
-
-        print(f"{split} real:", len(real_samples))
-        print(f"{split} fake:", len(fake_samples))
         print(f"{split} total:", len(self.samples))
 
-
     def __len__(self):
-
         return len(self.samples)
-
 
     def __getitem__(self, idx):
 
@@ -121,7 +119,7 @@ class AIGCDataset(Dataset):
         try:
             img = Image.open(path).convert("RGB")
         except:
-            return self.__getitem__(random.randint(0, len(self.samples)-1))
+            return self.__getitem__(random.randint(0, len(self.samples) - 1))
 
         img = self.transform(img)
 

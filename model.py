@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import timm
 import math
+from frequency_branch import FrequencyBranch
 
 
 # =========================
@@ -14,7 +15,7 @@ class LoRALinear(nn.Module):
 
         self.linear = linear
 
-        # 关键：补齐属性（DINOv3会用）
+        
         self.in_features = linear.in_features
         self.out_features = linear.out_features
 
@@ -52,8 +53,8 @@ class DinoV3Backbone(nn.Module):
     def __init__(self, ckpt_path, lora_r=8):
         super().__init__()
 
-        # 🔥 改这里：用官方模型
-        repo_path = "/data/hdd3/pw/dinov3-main"  # 你自己改路径
+        # 官方模型
+        repo_path = "/data/hdd3/pw/dinov3-main"  
 
         self.backbone = torch.hub.load(
             repo_path,
@@ -104,16 +105,30 @@ class DinoV3Detector(nn.Module):
 
         self.backbone = DinoV3Backbone(ckpt_path)
 
+        self.freq_branch = FrequencyBranch(out_dim=128)
+
         self.classifier = nn.Sequential(
-            nn.Linear(768,512),
+            nn.LayerNorm(768 * 2 + 128),
+            nn.Linear(768 * 2 + 128, 512),
             nn.GELU(),
-            nn.Dropout(0.3),
-            nn.Linear(512,2)
+            nn.Dropout(0.5),
+            nn.Linear(512, 2)
         )
 
     def forward(self, x):
 
-        feat = self.backbone(x)
+        feat_dict = self.backbone.backbone.forward_features(x)
+
+        patch_tokens = feat_dict["x_norm_patchtokens"]
+
+        mean_feat = patch_tokens.mean(dim=1)
+        std_feat = patch_tokens.std(dim=1)
+
+        vit_feat = torch.cat([mean_feat, std_feat], dim=1)
+
+        freq_feat = self.freq_branch(x)
+
+        feat = torch.cat([vit_feat, freq_feat], dim=1)
 
         out = self.classifier(feat)
 
