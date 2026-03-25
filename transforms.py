@@ -170,14 +170,16 @@ def get_train_transforms(img_size=224):
             transforms.RandomChoice([
 
                 RandomJPEGCompression(30, 90, p=1.0),
-                RandomGaussianNoise(std=10, p=1.0),
-                RandomPepperNoise(noise_ratio=0.02, p=1.0),
-                MotionBlur(kernel_size=5, p=1.0),
-                MedianBlur(kernel_size=3, p=1.0),
-                RandomSharpen((1.0, 2.0), p=1.0),
-
+               #RandomGaussianNoise(std=10, p=1.0),
+               #RandomPepperNoise(noise_ratio=0.02, p=1.0),
+               #MotionBlur(kernel_size=5, p=1.0),
+               #MedianBlur(kernel_size=3, p=1.0),
+               #RandomSharpen((1.0, 2.0), p=1.0),
+               transforms.RandomHorizontalFlip(),
+               transforms.ColorJitter(0.2, 0.2, 0.2, 0.05),
+               transforms.RandomApply([transforms.GaussianBlur(3)], p=0.3),
             ])
-        ], p=0.5),
+        ],p=0.5),
 
         transforms.ToTensor(),
 

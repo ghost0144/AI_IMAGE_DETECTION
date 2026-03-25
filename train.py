@@ -135,7 +135,7 @@ def main():
         train_data_root,
         "val",
         transform=val_transform,
-        max_samples=1000
+        max_samples=10000
     )
 
     test_dataset = AIGCDataset(
