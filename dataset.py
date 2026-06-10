@@ -24,7 +24,7 @@ class AIGCDataset(Dataset):
         real_samples = []
         fake_samples = []
 
-        split_dir = os.path.join(root_dir, split)
+        split_dir = root_dir
 
         if not os.path.exists(split_dir):
             raise ValueError(f"{split_dir} does not exist")
@@ -62,8 +62,8 @@ class AIGCDataset(Dataset):
 
             # 固定采样
             if max_samples is not None:
-                random.seed(42)
-                samples = random.sample(samples, min(len(samples), max_samples))
+                rng = random.Random(42)
+                samples = rng.sample(samples, min(len(samples), max_samples))
 
             # 固定顺序
             self.samples = sorted(samples)

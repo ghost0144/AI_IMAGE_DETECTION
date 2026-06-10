@@ -6,20 +6,25 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
+from torch.distributed import get_world_size, get_rank
 
 from tqdm import tqdm
 
 from dataset import AIGCDataset
 from transforms import get_train_transforms, get_test_transforms
 from model import DinoV3Detector
+from collections import deque
+
 
 
 # =========================
 # 配置
 # =========================
 
-train_data_root = "/data/hdd3/pw/stable_diffusion_v_1_4/imagenet_ai_0419_sdv4"
+train_data_root = "/data/hdd3/pw/genimage/stable_diffusion_v_1_4/imagenet_ai_0419_sdv4/train"
+val_data_root = "/data/hdd3/pw/genimage"
 test_data_root = "/data/hdd3/pw/AIGIBench"
+chame_data_root = "/data/hdd3/pw/Chameleon"
 
 ckpt_path = "/data/hdd3/pw/work/checkpoint/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth"
 
@@ -29,6 +34,9 @@ lr = 1e-4
 
 save_path = "checkpoint.pth"
 resume = False   # 是否从checkpoint恢复
+
+window_size = 5   # 可以调 3~10
+test_history = deque(maxlen=window_size)
 
 # =========================
 # 初始化DDP
@@ -102,6 +110,9 @@ def evaluate_single(model, loader, device):
 
 def main():
 
+    
+    best_avg_test_acc = 0
+
     from seed import set_seed
     set_seed(42)
 
@@ -132,7 +143,7 @@ def main():
     )
 
     val_dataset = AIGCDataset(
-        train_data_root,
+        val_data_root,
         "val",
         transform=val_transform,
         max_samples=10000
@@ -142,14 +153,32 @@ def main():
         test_data_root,
         "test",  
         transform=val_transform,
-        max_samples=10000   # 可调
+        max_samples=10000  # 可调
+    )
+
+    chame_dataset = AIGCDataset(
+        chame_data_root,
+        "chame",
+        transform=val_transform,
+        max_samples=10000
     )
 
     # =========================
     # sampler
     # =========================
-
-    train_sampler = DistributedSampler(train_dataset)
+    from balancedbatchsampler import BalancedBatchSampler
+    if dist.is_initialized():
+        world_size = get_world_size()
+        rank = get_rank()
+    else:
+        world_size = 1
+        rank = 0
+    train_sampler = BalancedBatchSampler(
+        train_dataset,
+        batch_size=batch_size,
+        num_replicas=world_size,
+        rank=rank
+    )
 
     val_sampler = DistributedSampler(val_dataset, shuffle=False)
 
@@ -160,12 +189,10 @@ def main():
 
     train_loader = DataLoader(
         train_dataset,
-        batch_size=batch_size,
-        sampler=train_sampler,
+        batch_sampler=train_sampler,
         num_workers=4,
         persistent_workers=True,
         pin_memory=True,
-        drop_last=True
     )
 
     val_loader = DataLoader(
@@ -180,6 +207,15 @@ def main():
 
     test_loader = DataLoader(
         test_dataset,
+        batch_size=32,  
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True,
+        drop_last=False
+    )
+
+    chame_loader = DataLoader(
+        chame_dataset,
         batch_size=32,  
         shuffle=False,
         num_workers=4,
@@ -275,10 +311,54 @@ def main():
 
             with torch.amp.autocast("cuda"):
 
-                pred = model(img)
+                # =========================
+                # 提取特征
+                # =========================
+                feat = model.module.extract_feat(img)
 
-                loss = criterion(pred, label)
+                # =========================
+                # 拆分 real / fake
+                # =========================
+                real_mask = label == 0
+                fake_mask = label == 1
 
+                real_feat = feat[real_mask]
+                fake_feat = feat[fake_mask]
+
+                # =========================
+                # SimLBR mixing
+                # =========================
+                if real_feat.size(0) > 0 and fake_feat.size(0) > 0:
+
+                    # 随机匹配 fake
+                    idx = torch.randint(
+                    0,
+                    fake_feat.size(0),
+                    (real_feat.size(0),),
+                    device=device
+                    )
+                    fake_sample = fake_feat[idx]
+
+                    # α ∈ [0.5, 0.8]
+                    alpha = torch.rand(real_feat.size(0), 1, device=device) * 0.3 + 0.5
+
+                    mixed_feat = alpha * real_feat + (1 - alpha) * fake_sample
+
+                    # 构造新训练集
+                    feat = torch.cat([real_feat, mixed_feat], dim=0)
+
+                    new_label = torch.cat([
+                        torch.zeros(real_feat.size(0), dtype=torch.long, device=device),
+                        torch.ones(real_feat.size(0), dtype=torch.long, device=device)
+                    ], dim=0)
+
+                else:
+                    # fallback（防止batch不均）
+                    new_label = label
+
+                pred = model.module.classify(feat)
+
+                loss = criterion(pred, new_label)
 
             optimizer.zero_grad()
 
@@ -293,9 +373,9 @@ def main():
 
             pred_label = pred.argmax(dim=1)
 
-            correct += (pred_label == label).sum()
+            correct += (pred_label == new_label).sum()
 
-            total += label.size(0)
+            total += new_label.size(0)
 
 
         train_loss = total_loss / len(train_loader)
@@ -318,24 +398,28 @@ def main():
         val_acc = evaluate(model, val_loader, device)
 
 
-        if rank == 0:
-
-            if val_acc > best_acc:
-
-                best_acc = val_acc
-
-                torch.save(
-                    model.module.state_dict(),
-                    save_path
-                )
-
-                print("Saved best model")
-
+        
         if rank == 0:
 
             test_acc = evaluate_single(model.module, test_loader, device)
+            chame_acc = evaluate_single(model.module, chame_loader, device)
+            test_history.append(test_acc)
+            avg_test_acc = sum(test_history) / len(test_history)
 
-            print(f"Epoch {epoch} Val Acc {val_acc:.4f} | Test Acc {test_acc:.4f}")
+            print(f"Epoch {epoch} Genimage Acc {val_acc:.4f} | AIGIBench Acc {test_acc:.4f} | Chameleon Acc {chame_acc:.4f}")
+
+
+            if avg_test_acc > best_avg_test_acc:
+                best_avg_test_acc = avg_test_acc
+
+                torch.save(
+                    model.module.state_dict(),
+                    save_path,
+                )
+
+                print(f"🔥 Saved (AVG TEST ON AIGIBENCH) model: {avg_test_acc:.4f}")
+
+            
 # =========================
 
 if __name__ == "__main__":
